@@ -1,0 +1,302 @@
+# college_fee_app.py
+from flask import Flask, request, redirect, url_for, render_template_string, flash, session
+from datetime import datetime
+import bcrypt
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+import os
+
+# ---------- CONFIG ----------
+APP_NAME = "AL-Amen College"
+DB_FILE = "sqlite:///college_local.db"
+SECRET_KEY = os.urandom(24)
+
+# Fee structure per class (you can change amounts)
+FEE_STRUCTURE = {
+    "9": 2000,
+    "10": 2200,
+    "11": 2500,
+    "12": 2800
+}
+
+MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+# ---------- DB SETUP ----------
+engine = create_engine(DB_FILE, connect_args={"check_same_thread": False})
+Base = declarative_base()
+SessionLocal = sessionmaker(bind=engine)
+db = SessionLocal()
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String)
+    email = Column(String, unique=True)
+    phone = Column(String)
+    clazz = Column(String)  # class 9..12
+    roll_no = Column(String)
+    password_hash = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # relationships
+    fees = relationship("FeeStatus", back_populates="user")
+
+class FeeStatus(Base):
+    __tablename__ = "fees"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    month = Column(String)      # e.g., "Jan"
+    year = Column(Integer)
+    paid = Column(Boolean, default=False)
+    paid_at = Column(DateTime, nullable=True)
+    user = relationship("User", back_populates="fees")
+
+Base.metadata.create_all(engine)
+
+# ---------- FLASK APP ----------
+app = Flask(__name__)
+app.secret_key = SECRET_KEY
+
+# ---------- HELPERS ----------
+def hash_password(plain):
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+def check_password(plain, hashed):
+    try:
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    except:
+        return False
+
+def init_fee_records_for_user(user):
+    """جب یوزر پہلی بار بنے تو اس کے لئے سال بھر کے مہینے داخل کریں (paid=False)"""
+    # use current year
+    y = datetime.utcnow().year
+    for m in MONTHS:
+        f = FeeStatus(user_id=user.id, month=m, year=y, paid=False)
+        db.add(f)
+    db.commit()
+
+def send_sms_simulated(phone, message):
+    """SMS بھیجنے کی simulation — یہاں آپ SMS gateway لگائیں گے"""
+    # placeholder: print to console (simulation)
+    print(f"[SIMULATED SMS] to {phone}: {message}")
+    # If you have a gateway (Twilio etc), integrate here and return True/False
+    return True
+
+# ---------- TEMPLATES (embedded for simplicity) ----------
+INDEX_HTML = """
+<!doctype html>
+<html><head><meta charset="utf-8"><title>{{app_name}}</title></head>
+<body>
+  <h1>{{app_name}}</h1>
+  <h3>رجسٹر کریں (پہلی بار)</h3>
+  <form method="post" action="/register">
+    نام: <input name="name" required><br>
+    ای میل: <input name="email" type="email" required><br>
+    موبائل نمبر: <input name="phone" required><br>
+    کلاس: 
+    <select name="clazz">
+      <option value="9">9</option>
+      <option value="10">10</option>
+      <option value="11">11</option>
+      <option value="12">12</option>
+    </select><br>
+    رول نمبر: <input name="roll_no" required><br>
+    پاس ورڈ: <input name="password" type="password" required><br>
+    <button type="submit">رجسٹر کریں</button>
+  </form>
+
+  <h3>لاگ ان کریں</h3>
+  <form method="post" action="/login">
+    ای میل: <input name="email" type="email" required><br>
+    پاس ورڈ: <input name="password" type="password" required><br>
+    <button type="submit">لاگ ان</button>
+  </form>
+
+  {% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <ul>
+    {% for m in messages %}
+      <li>{{m}}</li>
+    {% endfor %}
+    </ul>
+  {% endif %}
+  {% endwith %}
+</body></html>
+"""
+
+DASH_HTML = """
+<!doctype html>
+<html><head><meta charset="utf-8"><title>{{app_name}} - Dashboard</title>
+<style>
+  .paid { color: green; font-weight: bold; }
+  .notpaid { color: red; font-weight: bold; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #ccc; padding: 6px; }
+</style>
+</head>
+<body>
+  <h1>{{app_name}}</h1>
+  <p>خوش آمدید، <strong>{{user.name}}</strong> — کلاس: {{user.clazz}} — رول: {{user.roll_no}}</p>
+  <p><a href="/logout">لاگ آؤٹ</a></p>
+
+  <h3>سال {{year}} کی فیس</h3>
+  <table>
+    <tr><th>مہینہ</th><th>رقم (PKR)</th><th>حالت</th><th>عمل</th></tr>
+    {% for rec in fees %}
+      <tr>
+        <td>{{rec.month}}</td>
+        <td>{{fee_amount}}</td>
+        <td>
+          {% if rec.paid %}
+            <span class="paid">✔ ادا ہوا ({{rec.paid_at}})</span>
+          {% else %}
+            <span class="notpaid">✖ ادا نہیں</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if not rec.paid %}
+            <form method="post" action="/pay/{{rec.id}}" style="display:inline;">
+              <button type="submit">Pay</button>
+            </form>
+          {% else %}
+            -
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+</body></html>
+"""
+
+ADMIN_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><title>{{app_name}} - Admin</title></head><body>
+<h1>{{app_name}} - Admin View</h1>
+<p><a href="/">Home</a></p>
+<table border="1" cellpadding="6">
+<tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Class</th><th>Roll</th><th>Created</th></tr>
+{% for u in users %}
+<tr>
+  <td>{{u.id}}</td><td>{{u.name}}</td><td>{{u.email}}</td><td>{{u.phone}}</td><td>{{u.clazz}}</td><td>{{u.roll_no}}</td><td>{{u.created_at}}</td>
+</tr>
+{% endfor %}
+</table>
+</body></html>
+"""
+
+# ---------- ROUTES ----------
+@app.route("/")
+def index():
+    return render_template_string(INDEX_HTML, app_name=APP_NAME)
+
+@app.route("/register", methods=["POST"])
+def register():
+    name = request.form.get("name").strip()
+    email = request.form.get("email").strip().lower()
+    phone = request.form.get("phone").strip()
+    clazz = request.form.get("clazz")
+    roll_no = request.form.get("roll_no").strip()
+    password = request.form.get("password")
+
+    if not (name and email and phone and clazz and roll_no and password):
+        flash("تمام فیلڈز لازمی ہیں")
+        return redirect(url_for("index"))
+
+    # existing?
+    if db.query(User).filter_by(email=email).first():
+        flash("یہ ای میل پہلے سے رجسٹرڈ ہے")
+        return redirect(url_for("index"))
+
+    hashed = hash_password(password)
+    u = User(name=name, email=email, phone=phone, clazz=clazz, roll_no=roll_no, password_hash=hashed)
+    db.add(u)
+    db.commit()
+
+    # create fee records
+    init_fee_records_for_user(u)
+
+    flash("رجسٹریشن کامیاب۔ اب لاگ ان کریں")
+    return redirect(url_for("index"))
+
+@app.route("/login", methods=["POST"])
+def login():
+    email = request.form.get("email", "").strip().lower()
+    password = request.form.get("password", "")
+    u = db.query(User).filter_by(email=email).first()
+    if not u or not check_password(password, u.password_hash):
+        flash("غلط ای میل یا پاس ورڈ")
+        return redirect(url_for("index"))
+
+    # set session
+    session['user_id'] = u.id
+
+    # On login: send message (simulated) to user's mobile
+    msg = f"آپ نے {APP_NAME} میں لاگ ان کیا ہے۔ تاریخ: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+    sms_ok = send_sms_simulated(u.phone, msg)
+    if sms_ok:
+        flash("Login successful — SMS sent (simulated).")
+    else:
+        flash("Login successful — SMS sending failed (check gateway).")
+    return redirect(url_for("dashboard"))
+
+@app.route("/dashboard")
+def dashboard():
+    uid = session.get('user_id')
+    if not uid:
+        flash("براہ کرم پہلے لاگ ان کریں")
+        return redirect(url_for("index"))
+    u = db.query(User).filter_by(id=uid).first()
+    if not u:
+        flash("یوزر نہیں ملا")
+        return redirect(url_for("index"))
+
+    # fetch fee records for current year
+    year = datetime.utcnow().year
+    fees = db.query(FeeStatus).filter_by(user_id=u.id, year=year).all()
+    # get fee amount from structure
+    fee_amount = FEE_STRUCTURE.get(u.clazz, 0)
+    # format paid_at
+    fee_view = []
+    for f in fees:
+        paid_at = f.paid_at.strftime("%Y-%m-%d %H:%M:%S") if f.paid_at else ""
+        fee_view.append({
+            "id": f.id, "month": f.month, "paid": f.paid, "paid_at": paid_at
+        })
+    return render_template_string(DASH_HTML, app_name=APP_NAME, user=u, fees=fee_view, fee_amount=fee_amount, year=year)
+
+@app.route("/pay/<int:fee_id>", methods=["POST"])
+def pay(fee_id):
+    uid = session.get('user_id')
+    if not uid:
+        flash("پہلے لاگ ان کریں")
+        return redirect(url_for("index"))
+    fee = db.query(FeeStatus).filter_by(id=fee_id, user_id=uid).first()
+    if not fee:
+        flash("فیس کا ریکارڈ نہیں ملا")
+        return redirect(url_for("dashboard"))
+    if fee.paid:
+        flash("یہ مہینہ پہلے ہی ادا ہو چکا ہے")
+        return redirect(url_for("dashboard"))
+    # Here: integrate payment gateway. For demo, we mark paid directly.
+    fee.paid = True
+    fee.paid_at = datetime.utcnow()
+    db.commit()
+    flash(f"{fee.month} کی فیس ادا ہو گئی")
+    return redirect(url_for("dashboard"))
+
+# simple admin view to list users (no auth for simplicity; in production secure this)
+@app.route("/admin")
+def admin():
+    users = db.query(User).all()
+    return render_template_string(ADMIN_HTML, app_name=APP_NAME, users=users)
+
+@app.route("/logout")
+def logout():
+    session.pop('user_id', None)
+    flash("لاگ آؤٹ ہو گئے")
+    return redirect(url_for("index"))
+
+# ---------- RUN ----------
+if __name__ == "__main__":
+    # Run on all interfaces for LAN access; for local-only use host='127.0.0.1'
+    app.run(host="0.0.0.0", port=5000, debug=True)
